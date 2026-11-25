@@ -86,6 +86,19 @@ pub fn preferred() -> Vec<Box<dyn Backend>> {
     out
 }
 
+/// The backend a render encodes with: RAEA_MEDIA's when it names one, else Apple's hardware on a Mac, else the ffmpeg
+/// CLI when its H.264 encoder runs on this machine's GPU (NVENC, or Media Foundation's hardware encoder on Windows),
+/// else the portable software one (openh264). Decoding keeps preferred()'s order.
+pub fn encode_backend() -> String {
+    if let Ok(n) = std::env::var("RAEA_MEDIA") {
+        return n;
+    }
+    if cfg!(target_vendor = "apple") {
+        return "apple".into();
+    }
+    if ffmpeg::hardware_encoder() { "ffmpeg".into() } else { "soft".into() }
+}
+
 /// The backend named, wrapped by an installed signer as backends() wraps each.
 pub fn backend(name: &str) -> R<Box<dyn Backend>> {
     backend_unsigned(name).map(sign::wrap)
