@@ -58,20 +58,42 @@ pub fn h264() -> Option<Vec<&'static str>> {
     Some([&["-c:v", enc][..], rate, &["-pix_fmt", "yuv420p"]].concat())
 }
 
-/// The H.264 encoder `Ffmpeg::encoder` uses, chosen once a process: the first of NVIDIA's h264_nvenc, Windows Media
-/// Foundation's h264_mf on the GPU (in the LGPL build raea ships there) and libx264 that this machine's ffmpeg lists and
-/// that encodes two frames here (a listed hardware encoder still fails without its GPU or driver). RAEA_FFMPEG_ENCODER
-/// names one to use instead. None when there is no ffmpeg or none of them works.
-pub fn video_encoder() -> Option<&'static str> {
-    static PICK: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
-    *PICK.get_or_init(|| {
+/// The ffmpeg and H.264 encoder `Ffmpeg::encoder` uses, chosen once a process: the first of NVIDIA's h264_nvenc,
+/// Windows Media Foundation's h264_mf on the GPU (in the LGPL build raea ships there: Intel Quick Sync's or NVIDIA's
+/// MFT, whichever Windows offers) and libx264 that some copy of ffmpeg here lists and encodes two frames with (a listed
+/// hardware encoder still fails without its GPU or driver). Every copy is asked (raea_io_assets::tool_copies: the PATH's,
+/// raea's own beside raea.exe), so the encoder doesn't hang on which comes first on the PATH. RAEA_FFMPEG_ENCODER names
+/// the one encoder to look for. None when no ffmpeg here has a working one.
+fn pick() -> Option<&'static (PathBuf, &'static str)> {
+    static PICK: std::sync::OnceLock<Option<(PathBuf, &'static str)>> = std::sync::OnceLock::new();
+    PICK.get_or_init(|| {
         const ALL: [&str; 3] = ["h264_nvenc", "h264_mf", "libx264"];
-        if let Ok(want) = std::env::var("RAEA_FFMPEG_ENCODER") {
-            return ALL.into_iter().find(|e| *e == want);
-        }
-        let have = says("-encoders");
-        ALL.into_iter().find(|e| have.split_whitespace().any(|w| w == *e) && encodes(e))
+        let want: Vec<&'static str> = match std::env::var("RAEA_FFMPEG_ENCODER") {
+            Ok(w) => ALL.into_iter().filter(|e| *e == w).collect(),
+            Err(_) => ALL.to_vec(),
+        };
+        let copies: Vec<(PathBuf, String)> = raea_io_assets::tool_copies("ffmpeg")
+            .into_iter()
+            .map(|t| {
+                let out = Command::new(&t).args(["-hide_banner", "-encoders"]).stderr(Stdio::null()).output().map(|o| o.stdout).unwrap_or_default();
+                (t, String::from_utf8_lossy(&out).into_owned())
+            })
+            .collect();
+        want.into_iter().find_map(|enc| {
+            copies.iter().find(|(t, have)| have.split_whitespace().any(|w| w == enc) && encodes(t, enc)).map(|(t, _)| (t.clone(), enc))
+        })
     })
+    .as_ref()
+}
+
+/// The H.264 encoder `Ffmpeg::encoder` uses (pick), None without one.
+pub fn video_encoder() -> Option<&'static str> {
+    pick().map(|(_, e)| *e)
+}
+
+/// The ffmpeg `Ffmpeg::encoder` runs (pick).
+pub fn encoder_ffmpeg() -> Option<&'static Path> {
+    pick().map(|(t, _)| t.as_path())
 }
 
 /// Whether the encoder `Ffmpeg::encoder` uses runs on the GPU (NVENC, or Media Foundation's hardware encoder).
@@ -79,10 +101,9 @@ pub fn hardware_encoder() -> bool {
     matches!(video_encoder(), Some("h264_nvenc" | "h264_mf"))
 }
 
-/// Two black 256x256 NV12 frames through `enc` to nowhere: whether it works on this machine.
-fn encodes(enc: &str) -> bool {
-    let Ok(mut c) = cli("ffmpeg", false) else { return false };
-    let child = c
+/// Two black 256x256 NV12 frames through `ffmpeg`'s `enc` to nowhere: whether it works on this machine.
+fn encodes(ffmpeg: &Path, enc: &str) -> bool {
+    let child = Command::new(ffmpeg)
         .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", "nv12", "-s", "256x256", "-framerate", "30", "-i", "-"])
         .args(enc_args(enc, None, 2000))
         .args(["-f", "null", "-"])
@@ -447,12 +468,12 @@ impl Backend for Ffmpeg {
         })
     }
     fn encoder(&self, out: &Path, o: &EncodeOpts) -> R<Box<dyn VideoEncoder>> {
-        let enc = video_encoder().ok_or("ffmpeg: no H.264 encoder works here (h264_nvenc, h264_mf or libx264)")?;
+        let (tool, enc) = pick().map(|(t, e)| (t, *e)).ok_or("ffmpeg: no H.264 encoder works here (h264_nvenc, h264_mf or libx264)")?;
         let video = out.with_extension("video.mp4");
         // NV12 as the engine's GPU readback gives it (BT.709 limited range), else straight RGBA
         let input = if o.nv12 { "nv12" } else { "rgba" };
         let hw = enc != "libx264";
-        let child = cli("ffmpeg", false)?
+        let child = Command::new(tool)
             .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", input])
             .args(o.nv12.then_some(["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]).into_iter().flatten())
             .args(["-s", &format!("{}x{}", o.width, o.height), "-framerate", &o.fps.to_string(), "-i", "-"])
