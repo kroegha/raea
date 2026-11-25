@@ -25,6 +25,20 @@ fn exe(name: &str) -> String {
     if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
 }
 
+/// Every copy of `name` raea could run, in ffmpeg_tool's order and without fetching: each one on the PATH, the one
+/// beside raea's executable, then the one raea fetched earlier. For a choice between them (an encoder: the one whose
+/// ffmpeg encodes on the GPU, whichever PATH lists first).
+pub fn tool_copies(name: &str) -> Vec<PathBuf> {
+    let exe = exe(name);
+    let mut all: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).map(|d| d.join(&exe)).filter(|p| p.is_file()).collect()).unwrap_or_default();
+    all.extend(beside_exe(name));
+    let cached = raea_io_home::env_path("RAEA_TOOLS_CACHE", ".cache/raea-tools").join("ffmpeg").join("bin").join(&exe);
+    all.extend(Some(cached).filter(|p| p.is_file()));
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
+    all
+}
+
 fn on_path(name: &str) -> Option<PathBuf> {
     let exe = exe(name);
     std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&exe)).find(|p| p.is_file())

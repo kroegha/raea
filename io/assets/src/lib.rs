@@ -25,7 +25,7 @@ pub use splat::{ensure_splat, splat_dir, splat_params};
 mod local;
 use local::*;
 mod setup;
-pub use setup::{ffmpeg_tool, git, run_setup, setup_how, uv, venv_python};
+pub use setup::{ffmpeg_tool, git, run_setup, setup_how, tool_copies, uv, venv_python};
 #[cfg(test)]
 mod tests;
 
