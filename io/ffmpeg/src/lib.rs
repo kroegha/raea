@@ -58,6 +58,78 @@ pub fn h264() -> Option<Vec<&'static str>> {
     Some([&["-c:v", enc][..], rate, &["-pix_fmt", "yuv420p"]].concat())
 }
 
+/// The H.264 encoder `Ffmpeg::encoder` uses, chosen once a process: the first of NVIDIA's h264_nvenc, Windows Media
+/// Foundation's h264_mf on the GPU (in the LGPL build raea ships there) and libx264 that this machine's ffmpeg lists and
+/// that encodes two frames here (a listed hardware encoder still fails without its GPU or driver). RAEA_FFMPEG_ENCODER
+/// names one to use instead. None when there is no ffmpeg or none of them works.
+pub fn video_encoder() -> Option<&'static str> {
+    static PICK: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *PICK.get_or_init(|| {
+        const ALL: [&str; 3] = ["h264_nvenc", "h264_mf", "libx264"];
+        if let Ok(want) = std::env::var("RAEA_FFMPEG_ENCODER") {
+            return ALL.into_iter().find(|e| *e == want);
+        }
+        let have = says("-encoders");
+        ALL.into_iter().find(|e| have.split_whitespace().any(|w| w == *e) && encodes(e))
+    })
+}
+
+/// Whether the encoder `Ffmpeg::encoder` uses runs on the GPU (NVENC, or Media Foundation's hardware encoder).
+pub fn hardware_encoder() -> bool {
+    matches!(video_encoder(), Some("h264_nvenc" | "h264_mf"))
+}
+
+/// Two black 256x256 NV12 frames through `enc` to nowhere: whether it works on this machine.
+fn encodes(enc: &str) -> bool {
+    let Ok(mut c) = cli("ffmpeg", false) else { return false };
+    let child = c
+        .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", "nv12", "-s", "256x256", "-framerate", "30", "-i", "-"])
+        .args(enc_args(enc, None, 2000))
+        .args(["-f", "null", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return false };
+    let mut frame = vec![16u8; 256 * 256];
+    frame.resize(256 * 256 * 3 / 2, 128);
+    let fed = child.stdin.as_mut().map_or(false, |i| i.write_all(&frame).and_then(|_| i.write_all(&frame)).is_ok());
+    drop(child.stdin.take());
+    child.wait().map_or(false, |st| st.success()) && fed
+}
+
+/// `enc`'s arguments: constant quality when `quality` is given (0.85 -> CRF/CQ 13, 0.95 -> 11, 0.6 -> 18; Media
+/// Foundation's 0-100 scale), else an average of `kbps` with a 1.5x peak.
+fn enc_args(enc: &str, quality: Option<f32>, kbps: u32) -> Vec<String> {
+    let mut a: Vec<String> = vec!["-c:v".into(), enc.into()];
+    let crf = quality.map(|q| format!("{:.0}", 30.0 - 20.0 * q.clamp(0.0, 1.0)));
+    let rate = || vec!["-b:v".into(), format!("{kbps}k"), "-maxrate".into(), format!("{}k", kbps * 3 / 2), "-bufsize".into(), format!("{}k", kbps * 2)];
+    match enc {
+        "h264_nvenc" => {
+            a.extend(["-preset", "p5", "-tune", "hq", "-rc", "vbr"].map(String::from));
+            match crf {
+                Some(c) => a.extend(["-cq".into(), c, "-b:v".into(), "0".into()]),
+                None => a.extend(rate()),
+            }
+        }
+        "h264_mf" => {
+            a.extend(["-hw_encoding", "1"].map(String::from));
+            match quality {
+                Some(q) => a.extend(["-rate_control".into(), "quality".into(), "-quality".into(), format!("{:.0}", 100.0 * q.clamp(0.0, 1.0))]),
+                None => a.extend(["-b:v".into(), format!("{kbps}k")]),
+            }
+        }
+        _ => {
+            a.extend(["-preset", "medium"].map(String::from));
+            match crf {
+                Some(c) => a.extend(["-crf".into(), c]),
+                None => a.extend(rate()),
+            }
+        }
+    }
+    a
+}
+
 /// The facts, the presentation times, whether the colour matrix is untagged, and the decoder a VP8 or VP9 stream with
 /// alpha needs (libvpx: ffmpeg's own VP9 decoder drops the alpha WebM keeps beside the picture, #113).
 fn probe(path: &Path) -> R<(Info, Vec<f64>, bool, Option<&'static str>)> {
@@ -219,18 +291,38 @@ struct Encoder {
     video: PathBuf,
     out: PathBuf,
     frames: usize,
+    /// the ffmpeg encoder running (video_encoder)
+    enc: &'static str,
+    /// whether ffmpeg was opened for NV12 frames (EncodeOpts::nv12) rather than RGBA
+    nv12: bool,
+    width: usize,
+    height: usize,
+}
+
+impl Encoder {
+    fn write(&mut self, bytes: &[u8]) -> R<()> {
+        self.child.stdin.as_mut().unwrap().write_all(bytes).map_err(|e| format!("ffmpeg stdin: {e}"))?;
+        self.frames += 1;
+        Ok(())
+    }
 }
 
 impl VideoEncoder for Encoder {
     fn push(&mut self, rgba: &[u8]) -> R<()> {
-        self.child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(rgba)
-            .map_err(|e| format!("ffmpeg stdin: {e}"))?;
-        self.frames += 1;
-        Ok(())
+        if self.nv12 {
+            let nv12 = raea_io_codec::encode_convert_timed(|| raea_io_codec::yuv::rgba_to_nv12(rgba, self.width, self.height));
+            return self.write(&nv12);
+        }
+        self.write(rgba)
+    }
+    fn push_nv12(&mut self, nv12: &[u8], w: usize, h: usize) -> R<()> {
+        if self.nv12 {
+            return self.write(nv12);
+        }
+        let (y, u, v) = raea_io_codec::yuv::nv12_to_i420(nv12, w, h);
+        let mut rgba = Vec::new();
+        raea_io_codec::yuv::i420_to_rgba(&y, &u, &v, w, w / 2, w / 2, w, h, &mut rgba);
+        self.write(&rgba)
     }
     fn finish(mut self: Box<Self>, audio: Option<&Audio>) -> R<EncodeStats> {
         drop(self.child.stdin.take());
@@ -292,7 +384,7 @@ impl VideoEncoder for Encoder {
         Ok(EncodeStats {
             frames: self.frames,
             bytes: std::fs::metadata(&self.out).map(|m| m.len()).unwrap_or(0),
-            video_codec: "h264 (libx264)".into(),
+            video_codec: format!("h264 ({})", self.enc),
             audio_codec,
         })
     }
@@ -357,42 +449,19 @@ impl Backend for Ffmpeg {
         })
     }
     fn encoder(&self, out: &Path, o: &EncodeOpts) -> R<Box<dyn VideoEncoder>> {
+        let enc = video_encoder().ok_or("ffmpeg: no H.264 encoder works here (h264_nvenc, h264_mf or libx264)")?;
         let video = out.with_extension("video.mp4");
+        // NV12 as the engine's GPU readback gives it (BT.709 limited range), else straight RGBA
+        let input = if o.nv12 { "nv12" } else { "rgba" };
+        let hw = enc != "libx264";
         let child = cli("ffmpeg", false)?
-            .args([
-                "-v",
-                "error",
-                "-y",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgba",
-                "-s",
-                &format!("{}x{}", o.width, o.height),
-                "-framerate",
-                &o.fps.to_string(),
-                "-i",
-                "-",
-            ])
-            .args(["-c:v", "libx264", "-preset", "medium"])
-            // constant quality as CRF (0.85 -> 13, 0.95 -> 11, 0.6 -> 18), else the average bitrate
-            .args(match o.quality {
-                Some(q) => vec!["-crf".to_string(), format!("{:.0}", 30.0 - 20.0 * q.clamp(0.0, 1.0))],
-                None => vec![
-                    "-b:v".to_string(),
-                    format!("{}k", o.kbps),
-                    "-maxrate".to_string(),
-                    format!("{}k", o.kbps * 3 / 2),
-                    "-bufsize".to_string(),
-                    format!("{}k", o.kbps * 2),
-                ],
-            })
-            .args([
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-            ])
+            .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", input])
+            .args(o.nv12.then_some(["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]).into_iter().flatten())
+            .args(["-s", &format!("{}x{}", o.width, o.height), "-framerate", &o.fps.to_string(), "-i", "-"])
+            .args(enc_args(enc, o.quality, o.kbps))
+            .args(["-pix_fmt", if hw { "nv12" } else { "yuv420p" }])
+            .args(["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
+            .args(["-movflags", "+faststart"])
             .arg(&video)
             .stdin(Stdio::piped())
             .spawn()
@@ -402,6 +471,10 @@ impl Backend for Ffmpeg {
             video,
             out: out.to_path_buf(),
             frames: 0,
+            enc,
+            nv12: o.nv12,
+            width: o.width as usize,
+            height: o.height as usize,
         }))
     }
 }

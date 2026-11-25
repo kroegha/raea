@@ -85,7 +85,7 @@ pub fn render_fed(
     let mut enc_thread = None;
     let (mix_tx, mix_rx) = std::sync::mpsc::channel::<Option<raea_io_media::Audio>>();
     if !hashes {
-        let codec = ro.codec.clone().unwrap_or_else(raea_sys_frame::media_backend);
+        let codec = ro.codec.clone().unwrap_or_else(raea_io_media::encode_backend);
         let opts = ro.encode_opts(w, h, prog.fps, true, false, ten);
         let (t, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
         tx = Some(t);
@@ -186,7 +186,7 @@ pub fn render_with(prog: &Program, rows: &[Tup], dir: &Path, out: &Path, ro: &Re
         let mut enc_thread = None;
         if !hashes {
             let mix = match &ro.sound { Some(a) => Some(a.clone()), None => sound_tl(&prog, &tl, &rows, dir)? };
-            let codec = ro.codec.clone().unwrap_or_else(raea_sys_frame::media_backend);
+            let codec = ro.codec.clone().unwrap_or_else(raea_io_media::encode_backend);
             let opts = ro.encode_opts(w, h, prog.fps, true, false, ten);
             let (t, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
             tx = Some(t);
@@ -257,7 +257,7 @@ pub fn render_with(prog: &Program, rows: &[Tup], dir: &Path, out: &Path, ro: &Re
         let mut enc_thread = None;
         if !hashes && !pngs {
             let mix = match &ro.sound { Some(a) => Some(a.clone()), None => sound_tl(&prog, &tl, &rows, dir)? };
-            let codec = ro.codec.clone().unwrap_or_else(raea_sys_frame::media_backend);
+            let codec = ro.codec.clone().unwrap_or_else(raea_io_media::encode_backend);
             let opts = ro.encode_opts(w, h, prog.fps, true, engine::has_3d(&rows), ten);
             let (t, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
             tx = Some(t);
@@ -327,7 +327,7 @@ pub fn render_with(prog: &Program, rows: &[Tup], dir: &Path, out: &Path, ro: &Re
         let mix = match &ro.sound { Some(a) => Some(a.clone()), None => sound_tl(&prog, &tl, &rows, dir)? };
         let audio_s = ta.elapsed().as_secs_f64();
         engine::mem_mark("render: audio mixed");
-        let codec = ro.codec.clone().unwrap_or_else(raea_sys_frame::media_backend);
+        let codec = ro.codec.clone().unwrap_or_else(raea_io_media::encode_backend);
         let opts = ro.encode_opts(w, h, prog.fps, e.nv12, engine::has_3d(&rows), false);
         if ro.wants_10bit() {
             eprintln!("warning: 10-bit export: this render goes through the engine (3D, --ssim or RAEA_READBACK/RAEA_COMPOSITE), which makes 8-bit NV12; encoding 8-bit H.264");
