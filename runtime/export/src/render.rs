@@ -355,7 +355,7 @@ pub(crate) fn render_bundle_with(js: &Path, dir: &Path, out: &Path, wanted: Opti
         let clipping = scene::told_taking(&mut kept, cx.manifest.as_deref(), w, h, fps);
         write_manifest(&mut cx, (w, h, fps, total), clipping, |_| json!([]))?;
         return Ok(if folder {
-            format!("APPLIED  {} frames rendered to {} (bevy_ui, the page over its 3D)", wanted.len(), out.display())
+            format!("APPLIED  {} frames rendered to {} (bevy_ui, the page over its 3D{})", wanted.len(), out.display(), raea_runtime_encode::encoded_with())
         } else {
             format!("APPLIED  frame {} rendered to {} (bevy_ui, the page over its 3D)", wanted.last().copied().unwrap_or(0), out.display())
         });
@@ -438,7 +438,7 @@ pub(crate) fn render_bundle_with(js: &Path, dir: &Path, out: &Path, wanted: Opti
         let _ = std::fs::remove_dir_all(&work);
     }
     drop(page);
-    Ok(format!("APPLIED  {} frames rendered to {} ({react_ms:.0} ms a frame in React and bevy_ui)", frames.len(), out.display()))
+    Ok(format!("APPLIED  {} frames rendered to {} ({react_ms:.0} ms a frame in React and bevy_ui{})", frames.len(), out.display(), raea_runtime_encode::encoded_with()))
 }
 
 /// An engine for the scene path, drawing the guide data when `--aov` asked for it.

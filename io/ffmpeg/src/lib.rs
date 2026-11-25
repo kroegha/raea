@@ -106,14 +106,15 @@ fn enc_args(enc: &str, quality: Option<f32>, kbps: u32) -> Vec<String> {
     let rate = || vec!["-b:v".into(), format!("{kbps}k"), "-maxrate".into(), format!("{}k", kbps * 3 / 2), "-bufsize".into(), format!("{}k", kbps * 2)];
     match enc {
         "h264_nvenc" => {
-            a.extend(["-preset", "p5", "-tune", "hq", "-rc", "vbr"].map(String::from));
+            a.extend(["-preset", "p5", "-tune", "hq", "-profile:v", "high", "-rc", "vbr"].map(String::from));
             match crf {
                 Some(c) => a.extend(["-cq".into(), c, "-b:v".into(), "0".into()]),
                 None => a.extend(rate()),
             }
         }
         "h264_mf" => {
-            a.extend(["-hw_encoding", "1"].map(String::from));
+            // High profile; h264_mf parses -profile:v only as a number (100 = High, 77 = Main)
+            a.extend(["-hw_encoding", "1", "-profile:v", "100"].map(String::from));
             match quality {
                 Some(q) => a.extend(["-rate_control".into(), "quality".into(), "-quality".into(), format!("{:.0}", 100.0 * q.clamp(0.0, 1.0))]),
                 None => a.extend(["-b:v".into(), format!("{kbps}k")]),

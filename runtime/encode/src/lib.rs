@@ -69,14 +69,44 @@ impl RenderOpts {
     }
 }
 
+/// The video codec the last render's encoder finished with (EncodeStats::video_codec), for its summary line.
+static LAST_CODEC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// ", encoded with h264 (h264_nvenc)" for the render that just finished, or "" when it encoded no video.
+pub fn encoded_with() -> String {
+    LAST_CODEC.lock().unwrap().take().map(|c| format!(", encoded with {c}")).unwrap_or_default()
+}
+
+/// An encoder that notes, as it finishes, which codec it wrote (encoded_with).
+struct Noting(Box<dyn raea_io_media::VideoEncoder>);
+
+impl raea_io_media::VideoEncoder for Noting {
+    fn push(&mut self, rgba: &[u8]) -> raea_io_media::R<()> {
+        self.0.push(rgba)
+    }
+    fn push_nv12(&mut self, nv12: &[u8], w: usize, h: usize) -> raea_io_media::R<()> {
+        self.0.push_nv12(nv12, w, h)
+    }
+    fn push_p010(&mut self, p010: &[u8], w: usize, h: usize) -> raea_io_media::R<()> {
+        self.0.push_p010(p010, w, h)
+    }
+    fn finish(self: Box<Self>, audio: Option<&raea_io_media::Audio>) -> raea_io_media::R<raea_io_media::EncodeStats> {
+        let st = self.0.finish(audio)?;
+        *LAST_CODEC.lock().unwrap() = Some(st.video_codec.clone());
+        Ok(st)
+    }
+}
+
 /// The encoder for a render's video: a whole one's in segments split at `cuts` (raea-runtime-segments), a part's in
 /// one run; 10-bit (P010 frames) when `ten_bit`, else the platform's 8-bit (NV12).
 fn direct_encoder(codec: &str, out: &Path, opts: &raea_io_media::EncodeOpts, ten_bit: bool, cuts: Option<&Cuts>) -> Result<Box<dyn raea_io_media::VideoEncoder>, String> {
-    if let Some(c) = cuts {
-        return raea_runtime_segments::encoder(codec, out, opts, ten_bit, c);
-    }
-    let b = raea_io_media::backend(codec)?;
-    if ten_bit { b.encoder_10bit(out, opts) } else { b.encoder(out, opts) }
+    let enc = if let Some(c) = cuts {
+        raea_runtime_segments::encoder(codec, out, opts, ten_bit, c)?
+    } else {
+        let b = raea_io_media::backend(codec)?;
+        if ten_bit { b.encoder_10bit(out, opts)? } else { b.encoder(out, opts)? }
+    };
+    Ok(Box::new(Noting(enc)))
 }
 
 /// One direct-render frame to the encoder: P010 or NV12, as the view made it.
